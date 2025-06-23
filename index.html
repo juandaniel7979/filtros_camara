@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cámara con Efecto de Esferas, Filtros, Audio y Fotos</title>
+    <title>Cámara Avanzada con Efectos y Galería</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
     <style>
@@ -184,7 +184,7 @@
     </style>
 </head>
 <body>
-    <h1>Cámara con Efecto de Esferas, Filtros, Audio y Fotos</h1>
+    <h1>Cámara Avanzada con Efectos y Galería</h1>
 
     <div class="main-content">
         <div class="controls camera-controls">
@@ -205,7 +205,8 @@
                 </select>
             </label>
 
-            <label class="checkbox-label"> <input type="checkbox" id="enableSpheresCheckbox" checked>
+            <label class="checkbox-label">
+                <input type="checkbox" id="enableSpheresCheckbox" checked>
                 Habilitar Efecto de Esferas
             </label>
 
@@ -225,6 +226,7 @@
                 <span id="randomnessValue">50</span>
             </label>
             <button id="takePictureButton">Tomar Foto</button>
+            <button id="toggleCameraButton">Alternar Cámara</button>
         </div>
 
         <div class="camera-section">
@@ -302,13 +304,17 @@
         const randomnessValueSpan = document.getElementById('randomnessValue'); 
         const filterSelect = document.getElementById('filterSelect');
         const takePictureButton = document.getElementById('takePictureButton'); 
-        const enableSpheresCheckbox = document.getElementById('enableSpheresCheckbox'); // Nuevo checkbox
+        const enableSpheresCheckbox = document.getElementById('enableSpheresCheckbox');
+        const toggleCameraButton = document.getElementById('toggleCameraButton'); 
 
         let pixelSize = parseInt(pixelationRange.value);
         let blurRadius = parseInt(blurAmountRange.value);
         let randomnessFactor = parseInt(randomnessAmountRange.value) / 100;
         let currentImageFilter = filterSelect.value; 
-        let spheresEnabled = enableSpheresCheckbox.checked; // Estado inicial del checkbox
+        let spheresEnabled = enableSpheresCheckbox.checked; 
+
+        // Nueva variable para controlar la cámara actual
+        let currentFacingMode = 'user'; // 'user' para cámara frontal, 'environment' para cámara trasera
 
         // --- Variables DOM para Audio ---
         const startAudioButton = document.getElementById('startAudioButton');
@@ -368,11 +374,17 @@
             currentImageFilter = e.target.value;
         };
 
-        enableSpheresCheckbox.onchange = (e) => { // Nuevo event listener para el checkbox
+        enableSpheresCheckbox.onchange = (e) => {
             spheresEnabled = e.target.checked;
         };
 
+        toggleCameraButton.onclick = () => {
+            toggleCamera();
+        };
+
         // --- Acceso a la Cámara (Video) ---
+        // Se inicializa la cámara para que el canvas muestre algo al cargar la página
+        // La lógica de stream principal y permisos se gestiona en startAudioProcessing
         navigator.mediaDevices.getUserMedia({ video: true })
             .then((stream) => {
                 video.srcObject = stream;
@@ -382,9 +394,10 @@
                 };
             })
             .catch((err) => {
-                console.error("Error al acceder a la cámara: ", err);
-                alert("No se pudo acceder a la cámara. Asegúrate de haber dado permiso.");
+                console.error("Error al acceder a la cámara inicial: ", err);
+                // Si falla aquí, no alertamos para no duplicar la alerta de startAudioProcessing
             });
+
 
         // --- Funciones de Filtro de Imagen ---
         const imageFilters = { 
@@ -515,7 +528,7 @@
             }
         };
 
-        // --- Bucle de Procesamiento de Video (MODIFICADO) ---
+        // --- Bucle de Procesamiento de Video ---
         function processVideoFrame() {
             if (video.paused || video.ended) {
                 return;
@@ -540,7 +553,7 @@
 
             ctx.clearRect(0, 0, videoWidth, videoHeight); // Limpia el canvas de salida
 
-            if (spheresEnabled) { // <--- NUEVA CONDICIÓN AQUÍ
+            if (spheresEnabled) {
                 // Lógica para dibujar esferas difuminadas (si está habilitado)
                 for (let y = 0; y < videoHeight; y += pixelSize) {
                     for (let x = 0; x < videoWidth; x += pixelSize) {
@@ -577,15 +590,78 @@
                 }
             } else {
                 // Si las esferas están deshabilitadas, dibuja la imagen filtrada directamente en el canvas de salida
-                // Primero, aplica los datos de píxeles modificados al tempCtx (si el filtro modificó imageData)
                 tempCtx.putImageData(imageData, 0, 0); 
-                // Luego, dibuja la imagen del tempCanvas al outputCanvas
                 ctx.drawImage(tempCanvas, 0, 0, videoWidth, videoHeight);
             }
             requestAnimationFrame(processVideoFrame);
         }
 
         // --- Funciones y Nodos de Audio ---
+
+        // Función para alternar entre cámaras
+        async function toggleCamera() {
+            // Si ya hay un stream, detenerlo para liberar la cámara
+            if (video.srcObject) {
+                video.srcObject.getTracks().forEach(track => track.stop());
+            }
+
+            // Alternar el modo de la cámara
+            currentFacingMode = (currentFacingMode === 'user') ? 'environment' : 'user';
+
+            // Intentar obtener el stream con el nuevo facingMode
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: {
+                        facingMode: currentFacingMode 
+                    },
+                    audio: true 
+                });
+
+                // Asignar el nuevo stream al elemento de video
+                video.srcObject = stream;
+                video.onloadedmetadata = () => {
+                    video.play();
+                };
+
+                // Si el contexto de audio está activo, reiniciar la cadena de audio con el nuevo stream.
+                if (audioContext && audioContext.state === 'running') {
+                    // Desconectar la fuente antigua si existe
+                    if (mediaStreamSource) {
+                        try { mediaStreamSource.disconnect(); } catch (e) { console.warn("Old mediaStreamSource disconnect error:", e.message); }
+                    }
+                    // Crear una nueva fuente con el nuevo stream de video (que incluye el audio)
+                    mediaStreamSource = audioContext.createMediaStreamSource(stream);
+                    // Reconectar la nueva fuente a la cadena de audio
+                    setupVoiceFilterNodes(); // Esto reconectará mediaStreamSource a mainGainNode
+                    
+                    // Asegurarse de que mainGainNode y delayOutputGainNode estén conectados al destino y analizador
+                    // Es mejor desconectar y reconectar estos también para evitar errores de duplicidad.
+                    try { mainGainNode.disconnect(audioContext.destination); } catch (e) {}
+                    try { mainGainNode.disconnect(delayNode); } catch (e) {}
+                    try { delayOutputGainNode.disconnect(audioContext.destination); } catch (e) {}
+                    try { mainGainNode.disconnect(analyserNode); } catch (e) {}
+                    try { delayOutputGainNode.disconnect(analyserNode); } catch (e) {}
+                    try { analyserNode.disconnect(audioContext.destination); } catch (e) {}
+
+                    // Volver a conectar la cadena principal limpia
+                    mainGainNode.connect(audioContext.destination); 
+                    mainGainNode.connect(delayNode); 
+                    delayOutputGainNode.connect(audioContext.destination); 
+                    mainGainNode.connect(analyserNode); 
+                    delayOutputGainNode.connect(analyserNode);
+                    analyserNode.connect(audioContext.destination); 
+                }
+
+                console.log(`Cámara cambiada a: ${currentFacingMode}`);
+
+            } catch (err) {
+                console.error("Error al alternar la cámara: ", err);
+                alert(`No se pudo cambiar la cámara. Asegúrate de que tu dispositivo tenga una cámara ${currentFacingMode === 'user' ? 'trasera' : 'frontal'} y que hayas dado permisos. Detalle: ` + err.name + " - " + err.message);
+                // Si falla, revertir el facingMode para la próxima vez
+                currentFacingMode = (currentFacingMode === 'user') ? 'environment' : 'user'; 
+            }
+        }
+
 
         function setupVoiceFilterNodes() {
             if (!audioContext || !mediaStreamSource) {
@@ -682,9 +758,16 @@
             }
 
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                // Pedimos el stream de video y audio aquí directamente
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: {
+                        facingMode: currentFacingMode 
+                    },
+                    audio: true 
+                });
+
                 audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                mediaStreamSource = audioContext.createMediaStreamSource(stream);
+                mediaStreamSource = audioContext.createMediaStreamSource(stream); 
 
                 mainGainNode = audioContext.createGain(); 
                 delayNode = audioContext.createDelay(2.0); 
@@ -713,6 +796,13 @@
 
                 setupVoiceFilterNodes(); 
                 
+                // Conecta el stream de video al elemento video aquí también
+                video.srcObject = stream;
+                video.onloadedmetadata = () => {
+                    video.play();
+                    requestAnimationFrame(processVideoFrame); // Inicia el bucle de procesamiento de video
+                };
+
                 console.log('Audio procesado y conectado.');
                 startAudioButton.disabled = true;
 
@@ -723,7 +813,7 @@
 
             } catch (err) {
                 console.error("Error al acceder al micrófono o procesar audio: ", err);
-                alert("No se pudo iniciar el procesamiento de audio. Asegúrate de haber dado permiso al micrófono. Detalle: " + err.name + " - " + err.message);
+                alert("No se pudo iniciar el procesamiento de audio. Asegúrate de haber dado permiso al micrófono y la cámara. Detalle: " + err.name + " - " + err.message);
             }
         }
 
@@ -844,11 +934,8 @@
 
         // --- Funcionalidad de Tomar Foto y Galería ---
         takePictureButton.onclick = () => {
-            // Capturar el contenido del outputCanvas
-            const imageDataURL = outputCanvas.toDataURL('image/png'); // Exportar como PNG
-
+            const imageDataURL = outputCanvas.toDataURL('image/png'); 
             capturedImages.push(imageDataURL);
-
             renderGallery();
         };
 
