@@ -599,6 +599,7 @@
         // --- Funciones y Nodos de Audio ---
 
         // Función para alternar entre cámaras
+         // --- Función para alternar entre cámaras ---
         async function toggleCamera() {
             // Si ya hay un stream, detenerlo para liberar la cámara
             if (video.srcObject) {
@@ -606,8 +607,17 @@
             }
 
             // Alternar el modo de la cámara
-            currentFacingMode = (currentFacingMode === 'user') ? 'environment' : 'user';
-
+            // Si es 'user', pasa a 'environment'. Si es 'environment', pasa a 'user'.
+            // Si es null (primera vez o fallback), intentamos 'environment' por defecto.
+            if (currentFacingMode === 'user') {
+                currentFacingMode = 'environment';
+            } else if (currentFacingMode === 'environment') {
+                currentFacingMode = 'user';
+            } else {
+                // Si no se ha definido previamente, empezamos intentando la cámara trasera
+                currentFacingMode = 'environment'; 
+            }
+            
             // Intentar obtener el stream con el nuevo facingMode
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ 
@@ -625,44 +635,88 @@
 
                 // Si el contexto de audio está activo, reiniciar la cadena de audio con el nuevo stream.
                 if (audioContext && audioContext.state === 'running') {
-                    // Desconectar la fuente antigua si existe
+                    // 1. Desconectar la fuente antigua del mediaStreamSource
                     if (mediaStreamSource) {
-                        try { mediaStreamSource.disconnect(); } catch (e) { console.warn("Old mediaStreamSource disconnect error:", e.message); }
+                        try { mediaStreamSource.disconnect(); } catch (e) { console.warn("Error al desconectar mediaStreamSource antiguo:", e.message); }
                     }
-                    // Crear una nueva fuente con el nuevo stream de video (que incluye el audio)
-                    mediaStreamSource = audioContext.createMediaStreamSource(stream);
-                    // Reconectar la nueva fuente a la cadena de audio
-                    setupVoiceFilterNodes(); // Esto reconectará mediaStreamSource a mainGainNode
-                    
-                    // Asegurarse de que mainGainNode y delayOutputGainNode estén conectados al destino y analizador
-                    // Es mejor desconectar y reconectar estos también para evitar errores de duplicidad.
-                    try { mainGainNode.disconnect(audioContext.destination); } catch (e) {}
-                    try { mainGainNode.disconnect(delayNode); } catch (e) {}
-                    try { delayOutputGainNode.disconnect(audioContext.destination); } catch (e) {}
-                    try { mainGainNode.disconnect(analyserNode); } catch (e) {}
-                    try { delayOutputGainNode.disconnect(analyserNode); } catch (e) {}
-                    try { analyserNode.disconnect(audioContext.destination); } catch (e) {}
+                    // 2. Desconectar las rutas principales de audio antes de reconectar la nueva fuente
+                    //    Es más seguro desconectar *todo* de los nodos que se van a reconectar.
+                    if (mainGainNode) {
+                        try { mainGainNode.disconnect(); } catch (e) { /* console.warn("Error al desconectar mainGainNode:", e.message); */ }
+                    }
+                    if (delayOutputGainNode) {
+                        try { delayOutputGainNode.disconnect(); } catch (e) { /* console.warn("Error al desconectar delayOutputGainNode:", e.message); */ }
+                    }
+                    if (analyserNode) {
+                        try { analyserNode.disconnect(); } catch (e) { /* console.warn("Error al desconectar analyserNode:", e.message); */ }
+                    }
 
-                    // Volver a conectar la cadena principal limpia
+
+                    // 3. Crear una nueva fuente con el nuevo stream de video (que incluye el audio)
+                    mediaStreamSource = audioContext.createMediaStreamSource(stream);
+                    
+                    // 4. Reconectar toda la cadena de procesamiento de audio
+                    //    mainGainNode y otros nodos ya existen si audioContext está corriendo.
+                    
+                    // Asegurar las conexiones básicas de la cadena de audio (directa y delay)
                     mainGainNode.connect(audioContext.destination); 
                     mainGainNode.connect(delayNode); 
                     delayOutputGainNode.connect(audioContext.destination); 
+                    
+                    // Conexiones al analizador
                     mainGainNode.connect(analyserNode); 
                     delayOutputGainNode.connect(analyserNode);
                     analyserNode.connect(audioContext.destination); 
+
+                    // Volver a configurar el filtro de voz con la nueva mediaStreamSource
+                    setupVoiceFilterNodes(); 
                 }
 
                 console.log(`Cámara cambiada a: ${currentFacingMode}`);
 
             } catch (err) {
                 console.error("Error al alternar la cámara: ", err);
-                alert(`No se pudo cambiar la cámara. Asegúrate de que tu dispositivo tenga una cámara ${currentFacingMode === 'user' ? 'trasera' : 'frontal'} y que hayas dado permisos. Detalle: ` + err.name + " - " + err.message);
-                // Si falla, revertir el facingMode para la próxima vez
-                currentFacingMode = (currentFacingMode === 'user') ? 'environment' : 'user'; 
+                // Si falla el facingMode específico, intentar con 'true' para que el navegador elija
+                if (err.name === 'OverconstrainedError' || err.name === 'NotAllowedError') {
+                    alert(`No se encontró una cámara ${currentFacingMode} o el permiso fue denegado. Intentando con cualquier cámara disponible.`);
+                    try {
+                        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                        video.srcObject = stream;
+                        video.onloadedmetadata = () => video.play();
+                        if (audioContext && audioContext.state === 'running') {
+                            if (mediaStreamSource) try { mediaStreamSource.disconnect(); } catch (e) {}
+                            mediaStreamSource = audioContext.createMediaStreamSource(stream);
+                            // Reconectar la cadena de audio desde la nueva fuente
+                            // Se asume que mainGainNode, delayNode, etc. ya existen.
+                            setupVoiceFilterNodes(); // Conecta mediaStreamSource a mainGainNode
+                            // Y el resto de la cadena
+                            mainGainNode.connect(audioContext.destination); 
+                            mainGainNode.connect(delayNode); 
+                            delayOutputGainNode.connect(audioContext.destination); 
+                            mainGainNode.connect(analyserNode); 
+                            delayOutputGainNode.connect(analyserNode);
+                            analyserNode.connect(audioContext.destination); 
+                        }
+                        console.log("Cambiado a cámara por defecto.");
+                        currentFacingMode = null; // Resetear facingMode
+                    } catch (retryErr) {
+                        console.error("Fallo al intentar con cámara por defecto:", retryErr);
+                        alert("No se pudo acceder a ninguna cámara. Asegúrate de los permisos y de que no esté en uso.");
+                        // Revertir facingMode para la próxima vez si queremos que intente la otra
+                        currentFacingMode = (currentFacingMode === 'user') ? 'environment' : 'user'; 
+                    }
+                } else {
+                    alert("Error general al alternar la cámara: " + err.message);
+                    // Revertir facingMode para la próxima vez
+                    currentFacingMode = (currentFacingMode === 'user') ? 'environment' : 'user'; 
+                }
             }
         }
 
 
+        // ... (Tu código existente para setupVoiceFilterNodes, makeDistortionCurve)
+
+ // --- Función para iniciar el contexto de audio y obtener el stream del micrófono ---
         function setupVoiceFilterNodes() {
             if (!audioContext || !mediaStreamSource) {
                 return;
@@ -750,7 +804,7 @@
         };
 
 
-        // Función para iniciar el contexto de audio y obtener el stream del micrófono
+         // --- Función para iniciar el contexto de audio y obtener el stream del micrófono ---
         async function startAudioProcessing() {
             if (audioContext && audioContext.state === 'running') {
                 console.log('Audio ya está corriendo.');
@@ -758,13 +812,22 @@
             }
 
             try {
-                // Pedimos el stream de video y audio aquí directamente
+                // PRIMER PASO: Obtener el stream del micrófono y la cámara
+                // Usamos 'video: true' para permitir que el navegador elija la cámara por defecto inicialmente.
+                // currentFacingMode se actualizará después de obtener el stream.
                 const stream = await navigator.mediaDevices.getUserMedia({ 
-                    video: {
-                        facingMode: currentFacingMode 
-                    },
+                    video: true, // Deja que el navegador elija la cámara inicialmente.
                     audio: true 
                 });
+
+                // Si se obtuvo un stream, actualiza el currentFacingMode para saber cuál se activó
+                const videoTrack = stream.getVideoTracks()[0];
+                if (videoTrack) {
+                    const settings = videoTrack.getSettings();
+                    if (settings.facingMode) {
+                        currentFacingMode = settings.facingMode;
+                    }
+                }
 
                 audioContext = new (window.AudioContext || window.webkitAudioContext)();
                 mediaStreamSource = audioContext.createMediaStreamSource(stream); 
@@ -785,16 +848,17 @@
                 delayNode.connect(feedbackGainNode);
                 feedbackGainNode.connect(delayNode);
 
+                // Conexiones finales para el audio que va al destino y al analizador
                 mainGainNode.connect(audioContext.destination); 
-                mainGainNode.connect(delayNode); 
+                mainGainNode.connect(delayNode); // La señal filtrada va al delay
 
-                delayOutputGainNode.connect(audioContext.destination); 
+                delayOutputGainNode.connect(audioContext.destination); // El delay va al destino
 
-                mainGainNode.connect(analyserNode); 
-                delayOutputGainNode.connect(analyserNode);
-                analyserNode.connect(audioContext.destination); 
+                mainGainNode.connect(analyserNode); // La señal filtrada va al analizador
+                delayOutputGainNode.connect(analyserNode); // El delay también va al analizador
+                analyserNode.connect(audioContext.destination); // El analizador va al destino (para que el audio se escuche)
 
-                setupVoiceFilterNodes(); 
+                setupVoiceFilterNodes(); // Conecta mediaStreamSource a mainGainNode (a través del filtro de voz)
                 
                 // Conecta el stream de video al elemento video aquí también
                 video.srcObject = stream;
@@ -813,7 +877,7 @@
 
             } catch (err) {
                 console.error("Error al acceder al micrófono o procesar audio: ", err);
-                alert("No se pudo iniciar el procesamiento de audio. Asegúrate de haber dado permiso al micrófono y la cámara. Detalle: " + err.name + " - " + err.message);
+                alert("No se pudo iniciar el procesamiento de audio. Asegúrate de haber dado permiso al micrófono y la cámara en la configuración del navegador y del sistema. Detalle: " + err.name + " - " + err.message);
             }
         }
 
